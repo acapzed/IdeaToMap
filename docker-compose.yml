@@ -1,0 +1,56 @@
+services:
+  ollama:
+    image: ollama/ollama
+    container_name: mindmap_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  ollama-init:
+    image: ollama/ollama
+    container_name: mindmap_ollama_init
+    depends_on:
+      - ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    entrypoint: >
+      sh -c "sleep 5 && ollama pull qwen2.5:7b"
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    profiles:
+      - init   # docker compose --profile init up 으로 최초 1회만 실행
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mindmap_backend
+    ports:
+      - "3001:3001"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434/v1
+      - OLLAMA_MODEL=qwen2.5:7b
+      - PORT=3001
+    depends_on:
+      - ollama
+    volumes:
+      - ./backend/src:/app/src   # 소스 변경 시 핫리로드
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mindmap_frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend/src:/app/src  # 소스 변경 시 핫리로드
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
