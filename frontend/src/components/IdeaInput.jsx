@@ -52,8 +52,7 @@ export default function IdeaInput() {
 
       {loading && (
         <p className="text-xs text-gray-400 text-center leading-relaxed">
-          AI가 아이디어를 분석하고 있습니다.<br />
-          최초 실행 시 모델 로딩으로 1~2분 소요될 수 있습니다.
+          아이디어를 검토하고 있습니다...
         </p>
       )}
 

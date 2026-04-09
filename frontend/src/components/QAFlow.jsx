@@ -20,13 +20,11 @@ export default function QAFlow() {
     setShowCustom(false)
 
     try {
-      const { delta, follow_up } = await api.submitAnswer(sessionId, question.id, answer)
-      applyDelta(question.id, answer, delta, null)
+      const { delta, next_question } = await api.submitAnswer(sessionId, question.id, answer)
+      applyDelta(question.id, answer, delta, next_question)
 
-      if (follow_up) applyFollowUp(follow_up)
-
-      const isLast = currentIndex + 1 >= questions.length
-      if (isLast) {
+      if (!next_question) {
+        // AI가 더 이상 질문 없다고 판단 → 리포트 생성
         const { enrichment } = await api.enrichMindmap(sessionId)
         applyEnrichment(enrichment)
       }
@@ -67,20 +65,18 @@ export default function QAFlow() {
 
   if (!question) return null
 
-  const progress = Math.round((currentIndex / questions.length) * 100)
-
   return (
     <div className="flex flex-col h-full overflow-y-auto">
-      {/* 진행바 */}
+      {/* 진행 표시 — 전체 개수 미정이라 답변 수만 표시 */}
       <div className="px-6 pt-6 pb-2">
         <div className="flex justify-between text-xs text-gray-400 mb-1.5">
-          <span>{currentIndex} / {questions.length}</span>
-          <span>{progress}%</span>
+          <span>{currentIndex}번째 질문</span>
+          <span className="italic">AI가 필요한 만큼 질문합니다</span>
         </div>
         <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
           <div
             className="h-full bg-blue-500 rounded-full transition-all duration-500"
-            style={{ width: `${progress}%` }}
+            style={{ width: `${Math.min(currentIndex * 11, 95)}%` }}
           />
         </div>
       </div>
@@ -90,6 +86,16 @@ export default function QAFlow() {
         <span className="text-xs bg-blue-50 text-blue-500 rounded-full px-3 py-1 w-fit font-medium">
           {CATEGORY_LABELS[question.category] ?? question.category}
         </span>
+
+        {/* AI 추측 말풍선 */}
+        {question.hypothesis && (
+          <div className="flex gap-2 items-start">
+            <div className="w-6 h-6 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0 text-xs">AI</div>
+            <div className="bg-blue-50 border border-blue-100 rounded-xl rounded-tl-none px-3 py-2 text-xs text-blue-700 leading-relaxed flex-1">
+              {question.hypothesis}
+            </div>
+          </div>
+        )}
 
         {/* 질문 */}
         <p className="text-sm font-semibold text-gray-800 leading-relaxed">{question.text}</p>
@@ -103,21 +109,39 @@ export default function QAFlow() {
 
         {/* 선택지 */}
         <div className="flex flex-col gap-2">
-          {question.options.map((opt) => (
-            <button
-              key={opt.label}
-              onClick={() => handleAnswer(opt.label)}
-              disabled={loading}
-              className="text-left rounded-xl p-3 text-sm disabled:opacity-40 transition-colors group border border-gray-200 hover:bg-blue-50 hover:border-blue-300"
-            >
-              <span className="text-gray-700 group-hover:text-blue-700">{opt.label}</span>
-              {opt.trade_off && (
-                <span className="block text-xs text-gray-400 mt-0.5 group-hover:text-blue-400">
-                  → {opt.trade_off}
+          {question.options.map((opt) => {
+            const isRecommended = question.recommended_label === opt.label
+            const isDefer = opt.label.startsWith('아직 미정')
+            return (
+              <button
+                key={opt.label}
+                onClick={() => handleAnswer(opt.label)}
+                disabled={loading}
+                className={`text-left rounded-xl p-3 text-sm disabled:opacity-40 transition-colors group border ${
+                  isDefer
+                    ? 'border-dashed border-gray-300 hover:border-gray-400'
+                    : isRecommended
+                    ? 'border-blue-300 bg-blue-50 hover:bg-blue-100'
+                    : 'border-gray-200 hover:bg-gray-50 hover:border-gray-300'
+                }`}
+              >
+                <span className={`block ${isDefer ? 'text-gray-400' : isRecommended ? 'text-blue-700 font-medium' : 'text-gray-700'}`}>
+                  {isRecommended && <span className="text-blue-400 mr-1">★</span>}
+                  {opt.label}
                 </span>
-              )}
-            </button>
-          ))}
+                {opt.trade_off && (
+                  <span className={`block text-xs mt-0.5 ${isDefer ? 'text-gray-400 italic' : 'text-gray-400'}`}>
+                    → {opt.trade_off}
+                  </span>
+                )}
+                {isRecommended && question.recommended_reason && (
+                  <span className="block text-xs text-blue-400 mt-0.5">
+                    {question.recommended_reason}
+                  </span>
+                )}
+              </button>
+            )
+          })}
 
           {/* 직접 입력 */}
           {!showCustom ? (

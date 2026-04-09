@@ -54,19 +54,15 @@ export const useSessionStore = create((set) => ({
     })),
 
   // POST /api/sessions/:id/answers 후
-  applyDelta: (questionId, answer, delta, followUp = null) =>
+  applyDelta: (questionId, answer, delta, nextQuestion = null) =>
     set((s) => {
-      // 꼬리 질문이 있으면 현재 위치 바로 다음에 삽입
-      const updatedQuestions = followUp
-        ? [
-            ...s.questions.slice(0, s.currentIndex + 1),
-            followUp,
-            ...s.questions.slice(s.currentIndex + 1),
-          ]
+      // 다음 질문이 있으면 큐에 추가
+      const updatedQuestions = nextQuestion && !s.questions.some((q) => q.id === nextQuestion.id)
+        ? [...s.questions, nextQuestion]
         : s.questions
 
       const nextIndex = s.currentIndex + 1
-      const done = nextIndex >= updatedQuestions.length
+      // next_question이 null이면 AI가 완료 판단 → ENRICHING으로 (QAFlow에서 처리)
       return {
         answers: { ...s.answers, [questionId]: answer },
         questions: updatedQuestions,
@@ -74,22 +70,17 @@ export const useSessionStore = create((set) => ({
         tradeOff: delta.trade_off,
         mindmapNodes: [...s.mindmapNodes, ...delta.add_nodes],
         mindmapEdges: [...s.mindmapEdges, ...delta.add_edges],
-        phase: done ? 'ENRICHING' : 'ANSWERING',
+        phase: 'ANSWERING',
       }
     }),
 
-  // 백그라운드 follow-up 수령 시 현재 위치 다음에 삽입
   applyFollowUp: (followUp) =>
     set((s) => {
       if (!followUp || s.phase !== 'ANSWERING') return s
       const already = s.questions.find((q) => q.id === followUp.id)
       if (already) return s
       return {
-        questions: [
-          ...s.questions.slice(0, s.currentIndex),
-          followUp,
-          ...s.questions.slice(s.currentIndex),
-        ],
+        questions: [...s.questions, followUp],
       }
     }),
 

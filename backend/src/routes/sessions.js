@@ -1,15 +1,23 @@
 import { Router } from 'express'
 import { createSession, getSession, updateSession } from '../store/sessions.js'
-import { generateClarifyQuestions, buildConfirmation, generateQuestions, generateFollowUp, generateReport, exploreCategory } from '../services/ollama.js'
+import { validateIdea, generateClarifyQuestions, buildConfirmation, generateNextQuestion, generateReport, exploreCategory } from '../services/ollama.js'
 import { answerToDelta } from '../services/delta.js'
 
 const router = Router()
 
 // POST /api/sessions
 // Body: { idea: string }
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   const { idea } = req.body
   if (!idea?.trim()) return res.status(400).json({ error: 'idea is required' })
+  if (idea.trim().length < 5) return res.status(400).json({ error: '아이디어를 좀 더 구체적으로 입력해주세요.' })
+
+  try {
+    const { valid, reason } = await validateIdea(idea.trim())
+    if (!valid) return res.status(400).json({ error: reason ?? '프로젝트 아이디어를 입력해주세요.' })
+  } catch {
+    // 검사 실패 시 통과 (서비스 중단 방지)
+  }
 
   const session = createSession(idea.trim())
   res.json({ session_id: session.id, mindmap: session.mindmap })
@@ -53,47 +61,24 @@ router.post('/:id/confirm/done', async (req, res) => {
   res.json({ confirmation })
 })
 
-// POST /api/sessions/:id/questions
-// Calls Ollama (prompt A), returns questions + greyed skeleton nodes
+// POST /api/sessions/:id/questions — 첫 번째 질문 생성
 router.post('/:id/questions', async (req, res) => {
   const session = getSession(req.params.id)
   if (!session) return res.status(404).json({ error: 'session not found' })
 
   let result
   try {
-    result = await generateQuestions(session.idea, session.confirmation)
+    result = await generateNextQuestion(session.idea, session.confirmation, [])
   } catch (err) {
-    console.error('[generateQuestions]', err)
-    return res.status(500).json({ error: 'Ollama 호출 실패', detail: err.message })
+    console.error('[generateNextQuestion]', err)
+    return res.status(500).json({ error: 'AI 호출 실패', detail: err.message })
   }
 
-  const { questions } = result
+  const firstQuestion = result.next_question
+  if (!firstQuestion) return res.status(500).json({ error: '질문 생성 실패' })
 
-  // Build greyed-out skeleton category nodes from question categories
-  const seen = new Set()
-  const skeletonNodes = []
-  const skeletonEdges = []
-
-  for (const q of questions) {
-    if (seen.has(q.category)) continue
-    seen.add(q.category)
-
-    const nodeId = `cat_${q.category}`
-    skeletonNodes.push({ id: nodeId, label: q.category, category: q.category, status: 'greyed' })
-    skeletonEdges.push({ id: `e_root_${nodeId}`, source: 'root', target: nodeId })
-  }
-
-  updateSession(req.params.id, (s) => ({
-    ...s,
-    questions,
-    mindmap: {
-      ...s.mindmap,
-      nodes: [...s.mindmap.nodes, ...skeletonNodes],
-      edges: [...s.mindmap.edges, ...skeletonEdges],
-    },
-  }))
-
-  res.json({ questions, skeleton_nodes: skeletonNodes, skeleton_edges: skeletonEdges })
+  updateSession(req.params.id, (s) => ({ ...s, questions: [firstQuestion] }))
+  res.json({ questions: [firstQuestion], skeleton_nodes: [], skeleton_edges: [] })
 })
 
 // POST /api/sessions/:id/answers
@@ -110,19 +95,20 @@ router.post('/:id/answers', async (req, res) => {
 
   const delta = answerToDelta(question, answer)
 
-  const prevAnswers = Object.entries(session.answers[user_id] ?? {}).map(([qid, ans]) => {
-    const q = session.questions.find((q) => q.id === qid)
-    return q ? { text: q.text, answer: ans } : null
-  }).filter(Boolean)
+  // 지금까지의 전체 히스토리 (이번 답변 포함)
+  const updatedAnswers = { ...(session.answers[user_id] ?? {}), [question_id]: answer }
+  const history = session.questions
+    .filter((q) => updatedAnswers[q.id])
+    .map((q) => ({ category: q.category, text: q.text, answer: updatedAnswers[q.id] }))
 
-  // follow-up 생성 (원래 질문에 한해)
-  let follow_up = null
-  if (!question.is_follow_up) {
+  // 다음 질문 동적 생성 (explore 질문은 제외)
+  let next_question = null
+  if (!question.is_explore) {
     try {
-      const result = await generateFollowUp(session.idea, prevAnswers, question, answer)
-      follow_up = result.follow_up ?? null
+      const result = await generateNextQuestion(session.idea, session.confirmation, history)
+      next_question = result.next_question ?? null
     } catch (err) {
-      console.warn('[generateFollowUp] 실패 (무시):', err.message)
+      console.warn('[generateNextQuestion] 실패 (무시):', err.message)
     }
   }
 
@@ -130,7 +116,7 @@ router.post('/:id/answers', async (req, res) => {
     ...s,
     answers: {
       ...s.answers,
-      [user_id]: { ...(s.answers[user_id] ?? {}), [question_id]: answer },
+      [user_id]: updatedAnswers,
     },
     mindmap: {
       ...s.mindmap,
@@ -142,12 +128,12 @@ router.post('/:id/answers', async (req, res) => {
       ],
       edges: [...s.mindmap.edges, ...delta.add_edges],
     },
-    questions: follow_up && !s.questions.some((q) => q.id === follow_up.id)
-      ? [...s.questions, follow_up]
+    questions: next_question && !s.questions.some((q) => q.id === next_question.id)
+      ? [...s.questions, next_question]
       : s.questions,
   }))
 
-  res.json({ delta, follow_up })
+  res.json({ delta, next_question })
 })
 
 // POST /api/sessions/:id/mindmap/enrich

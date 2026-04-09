@@ -7,14 +7,22 @@ const client = new OpenAI({
 
 const MODEL = process.env.AI_MODEL ?? 'llama-3.3-70b-versatile'
 
-// 모든 프롬프트 공통 시스템 지시 — 중국어 방지
-const SYSTEM_BASE = `You are a project planning assistant.
-LANGUAGE RULE (ABSOLUTE): Every single word in your JSON values MUST be in Korean (한국어).
-FORBIDDEN: Chinese characters (汉字/漢字), Japanese, or any non-Korean script.
-If you are about to write Chinese, STOP and write Korean instead.
+const SYSTEM_BASE = `You are a project planning assistant. Always respond in Korean (한국어).
 Output format: valid JSON only. No markdown fences, no explanation outside JSON.`
 
-const KOREAN_REMINDER = '\n\n[REMINDER: All text values in JSON must be written in Korean (한국어). No Chinese characters allowed.]'
+// 아이디어 유효성 검사 — 토큰 최소화를 위해 max_tokens 제한
+export const validateIdea = async (idea) => {
+  const res = await client.chat.completions.create({
+    model: MODEL,
+    messages: [
+      { role: 'system', content: 'You are a validator. Respond with valid JSON only.' },
+      { role: 'user', content: `Does this look like a software/service/game project idea a team could build? Input: "${idea}"\n\nJSON: {"valid": true/false, "reason": "한국어로 1문장"}` },
+    ],
+    temperature: 0,
+    max_tokens: 60,
+  })
+  return parseJSON(res.choices[0].message.content)
+}
 
 export const warmup = async () => {
   console.log(`[AI] Groq 연결 확인 중: ${MODEL}`)
@@ -65,7 +73,7 @@ JSON으로 응답하세요:
 }
 `.trim()
 
-  const raw = await chat(SYSTEM_BASE, user + KOREAN_REMINDER)
+  const raw = await chat(SYSTEM_BASE, user)
   const { questions } = parseJSON(raw)
   return questions
 }
@@ -95,7 +103,7 @@ JSON으로 응답하세요:
 }
 `.trim()
 
-  const raw = await chat(SYSTEM_BASE, user + KOREAN_REMINDER)
+  const raw = await chat(SYSTEM_BASE, user)
   return parseJSON(raw)
 }
 
@@ -119,101 +127,102 @@ ${history}
 
 이 답변을 바탕으로 더 깊이 파고들 꼬리 질문이 필요한지 판단하세요.
 꼬리 질문이 필요하면 1개만 한국어로 생성하고, 필요 없으면 null을 반환하세요.
+질문은 AI가 먼저 추측/가설을 제시하는 형태로 작성하세요.
+선택지 마지막에는 반드시 "아직 미정이에요 — 나중에 정할게요"를 포함하세요.
 
-JSON으로 응답하세요 (follow_up이 없으면 null):
+JSON으로 응답하세요 (follow_up이 없으면 {"follow_up": null}):
 {
   "follow_up": {
     "id": "${followUpId}",
     "category": "${category}",
+    "hypothesis": "저는 ~라고 생각해요 (AI 추측)",
     "text": "꼬리 질문 내용",
+    "recommended_label": "추천 선택지 label 문자열",
+    "recommended_reason": "추천 이유 1문장",
     "options": [
       { "label": "선택지 A", "trade_off": "영향" },
       { "label": "선택지 B", "trade_off": "영향" },
-      { "label": "선택지 C", "trade_off": "영향" }
+      { "label": "아직 미정이에요 — 나중에 정할게요", "trade_off": "리포트에서 AI가 결정을 도와드립니다" }
     ],
     "is_follow_up": true
   }
 }
 `.trim()
 
-  const raw = await chat(SYSTEM_BASE, user + KOREAN_REMINDER)
+  const raw = await chat(SYSTEM_BASE, user)
   return parseJSON(raw)
 }
 
-// Prompt A: idea + confirmation context → 질문 목록
-export const generateQuestions = async (idea, confirmation) => {
+// Prompt A: 다음 질문 1개 동적 생성 (히스토리 기반)
+export const generateNextQuestion = async (idea, confirmation, history = []) => {
   const contextBlock = confirmation
-    ? `
-아이디어 파악 결과:
+    ? `아이디어 파악 결과:
 - 핵심 문제: ${confirmation.core_problem ?? ''}
 - 대상 사용자: ${confirmation.target_user ?? ''}
 - 다듬어진 아이디어: ${confirmation.refined_idea ?? ''}
-- 요약: ${confirmation.summary ?? ''}
-`.trim()
+- 요약: ${confirmation.summary ?? ''}`
     : ''
+
+  const historyText = history.length > 0
+    ? history.map((h, i) => `Q${i + 1} [${h.category}]: ${h.text}\n→ ${h.answer}`).join('\n\n')
+    : '(아직 없음)'
+
+  const coveredCategories = [...new Set(history.map((h) => h.category))]
+  const questionCount = history.length
 
   const user = `
 프로젝트 아이디어: "${idea}"
-${contextBlock ? '\n' + contextBlock : ''}
+${contextBlock ? '\n' + contextBlock + '\n' : ''}
+지금까지 대화 (${questionCount}개 질문):
+${historyText}
 
-위 맥락을 바탕으로 팀이 실제로 무엇을 만들지 구체화하는 질문 8개를 한국어로 생성하세요.
+이미 다룬 카테고리: ${coveredCategories.join(', ') || '없음'}
 
-중요 지침:
-- 이 프로젝트의 성격(해커톤/캡스톤/소셜/교육/창업 등)에 맞는 질문을 만드세요.
-- 창업/비즈니스 프로젝트가 아니라면 시장 경쟁/수익 모델보다 팀 목적, 운영 방식, 실현 가능성에 집중하세요.
-- 첫 질문(purpose)은 반드시 "이 프로젝트를 왜/어떤 맥락에서 만드는지"를 물어야 합니다.
-- 선택지는 이 프로젝트에 실제로 해당하는 구체적인 옵션이어야 합니다 (일반적인 비즈니스 선택지 금지).
+위 대화를 바탕으로 다음에 물어볼 질문 1개를 생성하세요.
 
-아래 8개 카테고리를 순서대로 다루세요 (카테고리당 질문 1개):
-1. purpose        — 프로젝트 목적과 추진 맥락 (왜 만드는가, 어떤 자리에서 발표/사용되는가)
-2. team_personas  — 팀 구성과 역할 분담
-3. features       — 핵심 기능 범위 (MVP에 꼭 들어가야 할 것)
-4. constraints    — 시간/예산/기술 제약
-5. deliverables   — 최종 산출물 형태 (데모, 앱, 발표자료 등)
-6. market         — 유사 서비스/사례와 우리의 차별점 (비즈니스가 아니면 "기존에 어떤 방식이 있었는가"로 대체)
-7. risks          — 가장 큰 불확실성 또는 실패 원인
-8. success        — v1 완료 기준 (이걸 해냈으면 성공이다)
+질문 선택 우선순위 (아직 다루지 않은 것 우선):
+1. purpose — 추진 맥락 (해커톤/캡스톤/창업 등)
+2. team_personas — 팀 구성과 역할 분담
+3. features — MVP 핵심 기능 (이 프로젝트에서 실제로 만들 것)
+4. tech_stack — 기술 스택 (프론트엔드 / 백엔드 / DB / 핵심 라이브러리 각각)
+5. core_modules — 핵심 모듈 상세 (예: 요리게임이면 조리 메커니즘, 재료 시스템 등)
+6. constraints — 시간/인원/기술 제약
+7. deliverables — 최종 산출물 형태
+8. risks — 가장 큰 불확실성
+9. success — v1 완료 기준
 
-정확히 이 형태의 JSON으로 응답하세요:
+추가 규칙:
+- features가 나왔으면 반드시 tech_stack과 core_modules를 파고들 것
+- 이전 답변에서 애매하거나 미정으로 넘긴 것이 있으면 그것을 먼저 구체화할 것
+- 같은 카테고리 반복 금지 (단, 미정으로 넘긴 경우 제외)
+- ${questionCount >= 9 ? '질문이 충분합니다. 더 이상 필요 없으면 next_question을 null로 반환하세요.' : '아직 다룰 내용이 있으면 계속 질문을 생성하세요.'}
+
+질문 스타일:
+- AI가 먼저 추측/가설을 제시하고 팀이 확인하는 형태 ("저는 ~라고 생각해요. 맞나요?")
+- 이 프로젝트에 특화된 구체적 추측 (일반론 금지)
+- 선택지 마지막은 항상 "아직 미정이에요 — 나중에 정할게요" 고정
+
+JSON으로 응답하세요:
 {
-  "questions": [
-    {
-      "id": "q1",
-      "category": "purpose",
-      "text": "질문 내용",
-      "options": [
-        { "label": "선택지 A", "trade_off": "영향" },
-        { "label": "선택지 B", "trade_off": "영향" }
-      ]
-    }
-  ]
+  "next_question": {
+    "id": "q_${Date.now()}",
+    "category": "카테고리명",
+    "hypothesis": "저는 ~라고 생각해요.",
+    "text": "질문 내용",
+    "recommended_label": "추천할 선택지의 label 문자열",
+    "recommended_reason": "추천 이유 1문장",
+    "options": [
+      { "label": "선택지 A", "trade_off": "이 선택의 영향" },
+      { "label": "선택지 B", "trade_off": "이 선택의 영향" },
+      { "label": "선택지 C", "trade_off": "이 선택의 영향" },
+      { "label": "아직 미정이에요 — 나중에 정할게요", "trade_off": "리포트에서 AI가 결정을 도와드립니다" }
+    ]
+  }
 }
-
-질문당 선택지 4개씩 생성하세요. 총 8개 질문.
-각 질문마다 선택지 중 하나를 추천하세요 (이 프로젝트 맥락에서 가장 현실적인 것).
+더 이상 필요한 질문이 없으면: { "next_question": null }
 `.trim()
 
-  const schema = `
-정확히 이 형태의 JSON으로 응답하세요:
-{
-  "questions": [
-    {
-      "id": "q1",
-      "category": "purpose",
-      "text": "질문 내용",
-      "recommendation": { "index": 0, "reason": "이 프로젝트에 가장 적합한 이유 1문장" },
-      "options": [
-        { "label": "선택지 A", "trade_off": "영향" },
-        { "label": "선택지 B", "trade_off": "영향" },
-        { "label": "선택지 C", "trade_off": "영향" },
-        { "label": "선택지 D", "trade_off": "영향" }
-      ]
-    }
-  ]
-}
-recommendation.index는 options 배열의 0-based 인덱스입니다.`.trim()
-
-  const raw = await chat(SYSTEM_BASE, user + '\n\n' + schema + KOREAN_REMINDER)
+  const raw = await chat(SYSTEM_BASE, user)
   return parseJSON(raw)
 }
 
@@ -278,7 +287,7 @@ JSON으로 응답하세요:
 }
 `.trim()
 
-  const raw = await chat(SYSTEM_BASE, user + KOREAN_REMINDER)
+  const raw = await chat(SYSTEM_BASE, user)
   return parseJSON(raw)
 }
 
@@ -302,6 +311,8 @@ ${answersText}
 
 이 영역에 대해 더 구체적으로 파악하기 위한 심화 질문 3개를 생성하세요.
 일반적인 질문이 아니라, 이 프로젝트와 이 답변에 특화된 질문이어야 합니다.
+각 질문은 AI가 먼저 추측/가설을 제시하는 형태로 작성하세요.
+선택지 마지막에는 반드시 "아직 미정이에요 — 나중에 정할게요"를 포함하세요.
 
 JSON으로 응답하세요:
 {
@@ -309,12 +320,14 @@ JSON으로 응답하세요:
     {
       "id": "${exploreId}_1",
       "category": "explore",
+      "hypothesis": "저는 ~라고 생각해요 (AI 추측)",
       "text": "심화 질문 내용",
-      "recommendation": { "index": 0, "reason": "추천 이유" },
+      "recommended_label": "추천 선택지 label 문자열",
+      "recommended_reason": "추천 이유 1문장",
       "options": [
         { "label": "선택지 A", "trade_off": "영향" },
         { "label": "선택지 B", "trade_off": "영향" },
-        { "label": "선택지 C", "trade_off": "영향" }
+        { "label": "아직 미정이에요 — 나중에 정할게요", "trade_off": "리포트에서 AI가 결정을 도와드립니다" }
       ],
       "is_explore": true,
       "explore_topic": "${topic}"
@@ -323,6 +336,6 @@ JSON으로 응답하세요:
 }
 `.trim()
 
-  const raw = await chat(SYSTEM_BASE, user + KOREAN_REMINDER)
+  const raw = await chat(SYSTEM_BASE, user)
   return parseJSON(raw)
 }
