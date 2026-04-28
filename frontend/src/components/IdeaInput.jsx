@@ -28,7 +28,7 @@ export default function IdeaInput() {
   return (
     <div className="flex flex-col gap-4 p-6 h-full justify-center">
       <div>
-        <h1 className="text-2xl font-bold text-gray-800">IdeaToMap</h1>
+        <h1 className="text-2xl font-bold text-gray-800">Sharp</h1>
         <p className="text-gray-400 text-sm mt-1">
           아이디어를 한 줄로 입력하면 AI가 현실적인 계획으로 다듬어드립니다.
         </p>
